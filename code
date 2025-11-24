@@ -1,0 +1,207 @@
+# -*- coding: utf-8 -*-
+"""
+Analysis script for Weight Self-Stigma (WSS) and Exercise Habits (EH).
+Includes: Descriptive stats, Correlation, Regression (Chain Mediation), and Bootstrapping.
+
+Author: Bin Gai
+Date: 2025-10-25
+"""
+
+import sys
+import time
+import numpy as np
+import pandas as pd
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import seaborn as sns
+import networkx as nx
+from scipy.stats import pearsonr
+
+# --- Configuration ---
+FILE_PATH = r"C:\Users\Administrator\Desktop\数据.xlsx"
+SHEET_NAME = 'Sheet1'
+BOOTSTRAP_N = 5000
+
+# Plotting style preferences
+plt.style.use('seaborn-v0_8-whitegrid')
+# Font setup for Chinese character support in plots
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
+
+#Data Loading!!
+try:
+    df_raw = pd.read_excel(FILE_PATH, sheet_name=SHEET_NAME)
+except FileNotFoundError:
+    sys.exit(f"Error: File not found at {FILE_PATH}")
+
+#Preprocessing & Scoring
+# Define column slices based on survey structure
+# Indices are hardcoded based on the specific dataset structure
+cols_wss = df_raw.columns[18:30]  # WSS: 12 items
+cols_eh  = df_raw.columns[30:43]  # EH: 13 items
+cols_be  = df_raw.columns[43:73]  # BE: 30 items
+cols_se  = df_raw.columns[73:83]  # SE: 10 items
+
+# Ensure numeric types
+survey_cols = df_raw.columns[18:83]
+df_raw[survey_cols] = df_raw[survey_cols].apply(pd.to_numeric, errors='coerce')
+
+# Calculate Scores (Reverse scoring applied where necessary)
+# WSS: 5-point scale, reverse scoring (6 - x) -> High score = Low Stigma (Positive)
+df_raw['WSS_Score'] = (6 - df_raw[cols_wss]).mean(axis=1)
+
+# BE: 4-point scale, reverse scoring (5 - x) -> High score = High Esteem (Positive)
+df_raw['BE_Score'] = (5 - df_raw[cols_be]).mean(axis=1)
+
+# EH & SE: No reverse scoring needed
+df_raw['EH_Score'] = df_raw[cols_eh].mean(axis=1)
+df_raw['SE_Score'] = df_raw[cols_se].mean(axis=1)
+
+# Filter valid data for core analysis
+core_vars = ['WSS_Score', 'BE_Score', 'SE_Score', 'EH_Score']
+df = df_raw[core_vars].dropna().copy()
+print(f"Data loaded. N = {len(df)}")
+
+# Descriptive Statistics & Correlation
+labels_cn = ['体重自我污名', '身体自尊', '自我效能', '体育锻炼习惯']
+stats = df.describe().loc[['mean', 'std']].T
+stats.index = labels_cn
+
+print("\n--- Descriptive Statistics ---")
+print(stats)
+
+# Correlation Matrix Calculation
+corr_mat = df.corr()
+p_mat = df.corr(method=lambda x, y: pearsonr(x, y)[1])
+
+# Format Correlation Table for Display (Lower Triangle)
+corr_display = pd.DataFrame(index=labels_cn, columns=labels_cn)
+cols = list(corr_mat.columns)
+
+for i in range(len(cols)):
+    for j in range(len(cols)):
+        if i >= j:
+            r = corr_mat.iloc[i, j]
+            p = p_mat.iloc[i, j]
+            sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
+            corr_display.iloc[i, j] = f"{r:.3f}{sig}" if i != j else "1.000"
+        else:
+            corr_display.iloc[i, j] = ""
+
+print("\n--- Correlation Matrix ---")
+print(corr_display)
+
+# Plot 1: Heatmap
+plt.figure(figsize=(8, 6))
+sns.heatmap(corr_mat, annot=True, fmt=".2f", cmap="coolwarm", 
+            xticklabels=labels_cn, yticklabels=labels_cn, center=0)
+plt.title("Correlation Heatmap")
+plt.tight_layout()
+plt.show()
+
+# 4. Regression Analysis (Chain Mediation)
+# Standardize variables for beta coefficients
+df_z = (df - df.mean()) / df.std()
+
+# Models construction (OLS)
+# Path a1: WSS -> BE
+m1 = smf.ols('BE_Score ~ WSS_Score', data=df_z).fit()
+# Path a2, d21: WSS + BE -> SE
+m2 = smf.ols('SE_Score ~ WSS_Score + BE_Score', data=df_z).fit()
+# Path c', b1, b2: WSS + BE + SE -> EH
+m3 = smf.ols('EH_Score ~ WSS_Score + BE_Score + SE_Score', data=df_z).fit()
+# Total Effect: WSS -> EH
+m_total = smf.ols('EH_Score ~ WSS_Score', data=df_z).fit()
+
+print("\n--- Path Coefficients (Standardized) ---")
+print(f"Total Effect (c):  {m_total.params['WSS_Score']:.3f} (p={m_total.pvalues['WSS_Score']:.3f})")
+print(f"a1 (WSS->BE):      {m1.params['WSS_Score']:.3f} ***")
+print(f"d21 (BE->SE):      {m2.params['BE_Score']:.3f} ***")
+print(f"b2 (SE->EH):       {m3.params['SE_Score']:.3f} ***")
+print(f"Direct (c'):       {m3.params['WSS_Score']:.3f} (p={m3.pvalues['WSS_Score']:.3f})")
+
+# Plot 2: Path Diagram using NetworkX
+plt.figure(figsize=(10, 6))
+G = nx.DiGraph()
+pos = {'WSS': (-2, 0), 'BE': (0, 1), 'SE': (0, -1), 'EH': (2, 0)}
+
+# Add edges with weights
+edges = [
+    ('WSS', 'BE', m1.params['WSS_Score']),
+    ('WSS', 'SE', m2.params['WSS_Score']),
+    ('BE', 'SE', m2.params['BE_Score']),
+    ('BE', 'EH', m3.params['BE_Score']),
+    ('SE', 'EH', m3.params['SE_Score']),
+    ('WSS', 'EH', m3.params['WSS_Score'])
+]
+
+nx.draw_networkx_nodes(G, pos, node_size=3000, node_color='#A0CBE2', node_shape='s')
+edge_labels = {}
+for u, v, w in edges:
+    G.add_edge(u, v, weight=w)
+    edge_labels[(u, v)] = f"{w:.3f}"
+
+nx.draw_networkx_edges(G, pos, width=2, alpha=0.6, arrowsize=20)
+nx.draw_networkx_labels(G, pos, font_weight='bold')
+nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='red')
+
+plt.title("Chain Mediation Model Path Diagram")
+plt.axis('off')
+plt.show()
+
+# --- 5. Bootstrap Analysis for Indirect Effects ---
+print(f"\n--- Running Bootstrap ({BOOTSTRAP_N} iterations) ---")
+boot_res = []
+
+start = time.time()
+for _ in range(BOOTSTRAP_N):
+    # Resample with replacement
+    df_sample = df_z.sample(n=len(df_z), replace=True)
+    
+    # Re-fit models
+    # We only need coefficients, so using numpy/linalg directly would be faster, 
+    # but statsmodels is cleaner to read for this script.
+    b_a1 = smf.ols('BE_Score ~ WSS_Score', data=df_sample).fit().params['WSS_Score']
+    
+    mod2 = smf.ols('SE_Score ~ WSS_Score + BE_Score', data=df_sample).fit()
+    b_a2, b_d21 = mod2.params['WSS_Score'], mod2.params['BE_Score']
+    
+    mod3 = smf.ols('EH_Score ~ WSS_Score + BE_Score + SE_Score', data=df_sample).fit()
+    b_b1, b_b2 = mod3.params['BE_Score'], mod3.params['SE_Score']
+    
+    # Calculate Indirect Effects
+    ie1 = b_a1 * b_b1              # WSS -> BE -> EH
+    ie2 = b_a2 * b_b2              # WSS -> SE -> EH
+    ie3 = b_a1 * b_d21 * b_b2      # WSS -> BE -> SE -> EH
+    
+    boot_res.append([ie1, ie2, ie3, ie1+ie2+ie3])
+
+print(f"Bootstrap finished in {time.time()-start:.2f}s")
+
+# Process Bootstrap Results
+boot_df = pd.DataFrame(boot_res, columns=['Ind1 (BE)', 'Ind2 (SE)', 'Ind3 (Chain)', 'Total Ind'])
+ci = boot_df.quantile([0.025, 0.975])
+means = boot_df.mean()
+
+print("\nIndirect Effects (95% CI):")
+for col in boot_df.columns:
+    print(f"{col}: {means[col]:.3f} [{ci.loc[0.025, col]:.3f}, {ci.loc[0.975, col]:.3f}]")
+
+# Plot 3: Indirect Effects Bar Chart
+plt.figure(figsize=(10, 6))
+yerr = [means - ci.loc[0.025], ci.loc[0.975] - means]
+means.plot(kind='bar', yerr=yerr, capsize=5, color=['#4c72b0', '#55a868', '#c44e52', '#8172b2'], alpha=0.8)
+plt.axhline(0, color='k', linewidth=0.8)
+plt.title("Standardized Indirect Effects (with 95% CI)")
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.show()
+
+# Plot 4: Total vs Direct vs Indirect
+plt.figure(figsize=(6, 5))
+effects = [m_total.params['WSS_Score'], m3.params['WSS_Score'], means['Total Ind']]
+labels = ['Total Effect', 'Direct Effect', 'Total Indirect']
+plt.bar(labels, effects, color=['grey', 'orange', 'blue'], alpha=0.7)
+plt.title("Effect Decomposition")
+plt.tight_layout()
+plt.show()
